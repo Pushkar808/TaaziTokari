@@ -21,6 +21,7 @@ interface CustomerPortalProps {
   currentUser: UserProfile | null;
   onOpenAuth: () => void;
   onOpenLocation: () => void;
+  isLocationOpen?: boolean; // the address popup; the swipe hint waits until it is closed
   onSwitchToAdmin?: () => void;
   onSignOut: () => void;
 }
@@ -40,6 +41,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   currentUser,
   onOpenAuth,
   onOpenLocation,
+  isLocationOpen = false,
   onSwitchToAdmin,
   onSignOut,
 }) => {
@@ -49,20 +51,36 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const tabsRef = useRef<HTMLDivElement>(null);
 
   // On arrival, nudge the category tabs sideways and back once so people see they can swipe for more.
+  const swipeHintShown = useRef(false);
   useEffect(() => {
     const el = tabsRef.current;
+    if (isLocationOpen || swipeHintShown.current) return; // not while the address popup is up
     if (!el || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     const overflow = el.scrollWidth - el.clientWidth;
     if (overflow <= 8) return; // everything already fits
     const distance = Math.min(110, overflow);
+    swipeHintShown.current = true;
     const timers = [
       setTimeout(() => el.scrollTo({ left: distance, behavior: 'smooth' }), 700),
       setTimeout(() => el.scrollTo({ left: 0, behavior: 'smooth' }), 1500),
     ];
     return () => timers.forEach(clearTimeout);
-  }, []);
+  }, [isLocationOpen]);
   const [slots] = useState<DeliverySlot[]>(appStore.getDeliverySlots());
   const [notifications] = useState(appStore.getNotifications());
+  const activeNotifications = useMemo(() => notifications.filter((n) => n.isActive), [notifications]);
+  const [bannerIndex, setBannerIndex] = useState(0);
+  const [bannerPaused, setBannerPaused] = useState(false);
+  const bannerTouchX = useRef<number | null>(null);
+  const bannerCount = activeNotifications.length;
+  const goToBanner = (i: number) => setBannerIndex(((i % bannerCount) + bannerCount) % bannerCount);
+
+  // Rotate through the announcements every 6 seconds unless the user is looking at one.
+  useEffect(() => {
+    if (bannerCount < 2 || bannerPaused) return;
+    const timer = setInterval(() => setBannerIndex((i) => (i + 1) % bannerCount), 6000);
+    return () => clearInterval(timer);
+  }, [bannerCount, bannerPaused]);
   const [activeAddress, setActiveAddress] = useState<CustomerAddress | null>(appStore.getActiveAddress());
   const [cart, setCart] = useState<Record<string, number>>(appStore.getCart());
   // Admins also receive every customer's orders, so keep only this user's here
@@ -543,29 +561,82 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
         )}
 
         {/* PROMOTIONAL ANNOUNCEMENT BANNER */}
-        {notifications.length > 0 && notifications[0].isActive && (
-          <div className="bg-gradient-to-r from-[#072917] to-[#124b2f] rounded-3xl p-5 sm:p-6 text-white shadow-md flex flex-col md:flex-row items-center justify-between gap-4 border border-[#1b5033]">
-            <div className="space-y-1">
-              <span className="bg-[#f4a62a] text-[#072917] text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider">
-                Direct Farm Connect
-              </span>
-              <h2 className="text-lg sm:text-xl font-extrabold text-white">
-                {notifications[0].title}
-              </h2>
-              <p className="text-xs sm:text-sm text-emerald-100/90 max-w-2xl">
-                {notifications[0].message}
-              </p>
+        {bannerCount > 0 && (
+          <div
+            className="relative overflow-hidden rounded-3xl shadow-md border border-[#1b5033]"
+            onMouseEnter={() => setBannerPaused(true)}
+            onMouseLeave={() => setBannerPaused(false)}
+            onTouchStart={(e) => {
+              setBannerPaused(true);
+              bannerTouchX.current = e.touches[0].clientX;
+            }}
+            onTouchEnd={(e) => {
+              const start = bannerTouchX.current;
+              bannerTouchX.current = null;
+              setBannerPaused(false);
+              if (start === null) return;
+              const dx = e.changedTouches[0].clientX - start;
+              if (Math.abs(dx) > 40) goToBanner(bannerIndex + (dx < 0 ? 1 : -1));
+            }}
+          >
+            <div
+              className="flex transition-transform duration-500 ease-out"
+              style={{ transform: `translateX(-${Math.min(bannerIndex, bannerCount - 1) * 100}%)` }}
+            >
+              {activeNotifications.map((n) => (
+                <div
+                  key={n.id}
+                  className="w-full shrink-0 bg-gradient-to-r from-[#072917] to-[#124b2f] p-5 sm:p-6 pb-8 text-white flex flex-col md:flex-row items-center justify-between gap-4"
+                >
+                  <div className="space-y-1">
+                    <span className="bg-[#f4a62a] text-[#072917] text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider">
+                      Direct Farm Connect
+                    </span>
+                    <h2 className="text-lg sm:text-xl font-extrabold text-white">{n.title}</h2>
+                    <p className="text-xs sm:text-sm text-emerald-100/90 max-w-2xl">{n.message}</p>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <div className="bg-white/10 px-4 py-2 rounded-2xl text-center border border-white/15">
+                      <span className="text-[10px] text-emerald-300 block uppercase font-bold">Cutoff</span>
+                      <span className="text-sm font-black text-amber-300">10:00 PM Tonight</span>
+                    </div>
+                    <div className="bg-white/10 px-4 py-2 rounded-2xl text-center border border-white/15">
+                      <span className="text-[10px] text-emerald-300 block uppercase font-bold">Delivery</span>
+                      <span className="text-sm font-black text-white">6:00 AM Dawn</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="flex items-center gap-3 shrink-0">
-              <div className="bg-white/10 px-4 py-2 rounded-2xl text-center border border-white/15">
-                <span className="text-[10px] text-emerald-300 block uppercase font-bold">Cutoff</span>
-                <span className="text-sm font-black text-amber-300">10:00 PM Tonight</span>
-              </div>
-              <div className="bg-white/10 px-4 py-2 rounded-2xl text-center border border-white/15">
-                <span className="text-[10px] text-emerald-300 block uppercase font-bold">Delivery</span>
-                <span className="text-sm font-black text-white">6:00 AM Dawn</span>
-              </div>
-            </div>
+
+            {bannerCount > 1 && (
+              <>
+                <button
+                  onClick={() => goToBanner(bannerIndex - 1)}
+                  aria-label="Previous announcement"
+                  className="hidden sm:flex absolute left-2 top-1/2 -translate-y-1/2 w-8 h-8 items-center justify-center rounded-full bg-black/30 hover:bg-black/50 text-white"
+                >
+                  ‹
+                </button>
+                <button
+                  onClick={() => goToBanner(bannerIndex + 1)}
+                  aria-label="Next announcement"
+                  className="hidden sm:flex absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 items-center justify-center rounded-full bg-black/30 hover:bg-black/50 text-white"
+                >
+                  ›
+                </button>
+                <div className="absolute bottom-2 left-0 right-0 flex justify-center gap-1.5">
+                  {activeNotifications.map((n, i) => (
+                    <button
+                      key={n.id}
+                      onClick={() => goToBanner(i)}
+                      aria-label={`Show announcement ${i + 1}`}
+                      className={`h-1.5 rounded-full transition-all ${i === bannerIndex ? 'w-5 bg-[#f4a62a]' : 'w-1.5 bg-white/40'}`}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )}
 

@@ -96,6 +96,7 @@ export default function App() {
           currentUser={currentUser}
           onOpenAuth={() => setIsAuthModalOpen(true)}
           onOpenLocation={() => setIsLocationModalOpen(true)}
+          isLocationOpen={isLocationModalOpen}
           onSwitchToAdmin={currentUser?.role === 'admin' ? handleSwitchToAdmin : undefined}
           onSignOut={handleSignOut}
         />
