@@ -5,7 +5,7 @@
 // order history tracking, and unobtrusive feedback prompt.
 // ==============================================================================
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   ProductItem,
   ProductCategory,
@@ -25,6 +25,17 @@ interface CustomerPortalProps {
   onSignOut: () => void;
 }
 
+// Emoji shown on each category tile, keyed by category slug.
+const CATEGORY_ICONS: Record<string, string> = {
+  all: '🧺',
+  vegetables: '🥦',
+  fruits: '🍎',
+  'daily-essentials': '🥛',
+  'new-arrivals': '✨',
+  popular: '🔥',
+  'best-prices': '🏷️',
+};
+
 export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   currentUser,
   onOpenAuth,
@@ -35,6 +46,21 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   // Store states
   const [products, setProducts] = useState<ProductItem[]>(appStore.getProducts());
   const [categories] = useState<ProductCategory[]>(appStore.getCategories());
+  const tabsRef = useRef<HTMLDivElement>(null);
+
+  // On arrival, nudge the category tabs sideways and back once so people see they can swipe for more.
+  useEffect(() => {
+    const el = tabsRef.current;
+    if (!el || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const overflow = el.scrollWidth - el.clientWidth;
+    if (overflow <= 8) return; // everything already fits
+    const distance = Math.min(110, overflow);
+    const timers = [
+      setTimeout(() => el.scrollTo({ left: distance, behavior: 'smooth' }), 700),
+      setTimeout(() => el.scrollTo({ left: 0, behavior: 'smooth' }), 1500),
+    ];
+    return () => timers.forEach(clearTimeout);
+  }, []);
   const [slots] = useState<DeliverySlot[]>(appStore.getDeliverySlots());
   const [notifications] = useState(appStore.getNotifications());
   const [activeAddress, setActiveAddress] = useState<CustomerAddress | null>(appStore.getActiveAddress());
@@ -298,44 +324,33 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
       </div>
 
       {/* SINGLE MAIN BRAND HEADER & NAV */}
-      <header className="bg-[#072917] text-white sticky top-0 z-40 shadow-lg border-b border-[#14482a]">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
+      <header className="bg-[#072917] text-white sticky top-0 z-40 shadow-lg">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3">
           <div className="flex items-center justify-between gap-4">
-            {/* 1. Brand Logo & Title */}
-            <div className="flex items-center gap-3 cursor-pointer shrink-0" onClick={() => setSelectedCategorySlug('all')}>
-              <TaaziTokariEmblem size={44} className="hover:scale-105 transition-transform drop-shadow" />
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-headline-md text-xl sm:text-2xl font-extrabold tracking-tight text-white">
-                    Taazi Tokari
+            {/* 1. Brand emblem + delivery location (headline) */}
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="cursor-pointer shrink-0" onClick={() => setSelectedCategorySlug('all')} title="Taazi Tokari">
+                <TaaziTokariEmblem size={40} className="hover:scale-105 transition-transform drop-shadow" />
+              </div>
+              <button
+                onClick={onOpenLocation}
+                className="text-left min-w-0 max-w-[200px] sm:max-w-md"
+                title="Change Delivery Location"
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[#f4a62a] text-base shrink-0">📍</span>
+                  <span className="text-base sm:text-lg font-extrabold text-white truncate">
+                    {activeAddress ? activeAddress.blockBuilding : 'Select Lucknow Location'}
                   </span>
-                  <span className="bg-[#f4a62a] text-[#072917] text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider hidden sm:inline">
-                    ताज़ी टोकरी
-                  </span>
+                  <span className="text-[#8bba9b] text-xs shrink-0">⌄</span>
                 </div>
-                <p className="text-[11px] text-[#8bba9b] font-semibold hidden md:block">
-                  Farm-to-Kitchen Fresh Produce • Lucknow
+                <p className="text-[11px] text-[#8bba9b] font-semibold truncate">
+                  {activeAddress
+                    ? `${activeAddress.flatNumber}, Lucknow`
+                    : 'Taazi Tokari • Farm-to-Kitchen Fresh Produce'}
                 </p>
-              </div>
+              </button>
             </div>
-
-            {/* 2. Delivery Location Pill */}
-            <button
-              onClick={onOpenLocation}
-              className="bg-[#0e3b23] hover:bg-[#155030] border border-[#236841] text-white px-3 py-1.5 rounded-2xl flex items-center gap-2 transition-all shadow-sm max-w-[200px] sm:max-w-xs truncate"
-              title="Change Delivery Location"
-            >
-              <span className="text-amber-400 text-sm shrink-0">📍</span>
-              <div className="text-left truncate">
-                <span className="text-[10px] text-[#8bba9b] font-bold block uppercase tracking-wider">
-                  Deliver to
-                </span>
-                <span className="text-xs font-bold text-white truncate block">
-                  {activeAddress ? `${activeAddress.blockBuilding}, ${activeAddress.flatNumber}` : 'Select Lucknow Location'}
-                </span>
-              </div>
-              <span className="text-gray-400 text-xs hidden sm:inline">▼</span>
-            </button>
 
             {/* 3. Actions: Orders, Cart, Profile */}
             <div className="flex items-center gap-2 shrink-0">
@@ -412,7 +427,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
           </div>
 
           {/* Search Bar */}
-          <div className="mt-3">
+          <div className="mt-3 mb-3">
             <div className="relative">
               <input
                 type="text"
@@ -433,6 +448,33 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                 </button>
               )}
             </div>
+          </div>
+
+          {/* CATEGORY TABS: icon tiles; the selected one rises into the page below */}
+          <div ref={tabsRef} className="flex items-end gap-2 overflow-x-auto no-scrollbar pt-1">
+            {categories.map((cat) => {
+              const isSelected = selectedCategorySlug === cat.slug;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => setSelectedCategorySlug(cat.slug)}
+                  className={`shrink-0 flex flex-col items-center gap-1 px-4 pt-2.5 transition-all ${
+                    isSelected
+                      ? 'bg-[#f8faf8] text-[#072917] rounded-t-3xl pb-2.5 min-w-[84px]'
+                      : 'bg-white/10 hover:bg-white/15 text-[#c9e3d1] rounded-t-2xl mb-0 pb-2 min-w-[76px] border border-b-0 border-white/10'
+                  }`}
+                >
+                  <span
+                    className={`flex items-center justify-center rounded-2xl text-2xl w-11 h-11 ${
+                      isSelected ? 'bg-[#bdeecd] shadow-sm' : 'bg-[#0e3b23]'
+                    }`}
+                  >
+                    {CATEGORY_ICONS[cat.slug] ?? '🥬'}
+                  </span>
+                  <span className="text-[11px] font-extrabold whitespace-nowrap">{cat.nameEn}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       </header>
@@ -526,31 +568,6 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
             </div>
           </div>
         )}
-
-        {/* CATEGORY FILTER TABS (Large, readable, touch-friendly) */}
-        <div>
-          <div className="flex items-center gap-2 overflow-x-auto pb-2 no-scrollbar">
-            {categories.map((cat) => {
-              const isSelected = selectedCategorySlug === cat.slug;
-              return (
-                <button
-                  key={cat.id}
-                  onClick={() => setSelectedCategorySlug(cat.slug)}
-                  className={`px-4 py-2.5 rounded-2xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap flex items-center gap-2 shrink-0 ${
-                    isSelected
-                      ? 'bg-emerald-800 text-white shadow-md scale-[1.02]'
-                      : 'bg-white hover:bg-emerald-50 text-gray-700 border border-gray-200'
-                  }`}
-                >
-                  <span>{cat.nameEn}</span>
-                  <span className={`text-[11px] font-normal ${isSelected ? 'text-emerald-200' : 'text-gray-400'}`}>
-                    ({cat.nameHi})
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
 
         {/* PRODUCT CATALOG GRID */}
         <div>
