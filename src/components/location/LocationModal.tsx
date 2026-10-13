@@ -110,7 +110,7 @@ export const LocationModal: React.FC<LocationModalProps> = ({
     );
   };
 
-  const handleSaveAddress = (e: React.FormEvent) => {
+  const handleSaveAddress = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!recipientName.trim() || !phoneNumber.trim() || !flatNumber.trim() || !addressLine.trim()) {
       setErrorMsg('Please fill in recipient name, phone, flat/house number, and address line.');
@@ -133,9 +133,13 @@ export const LocationModal: React.FC<LocationModalProps> = ({
       isDefault: true,
     };
 
-    appStore.saveUserAddress(newAddress);
-    onAddressSelected(newAddress);
-    onClose();
+    try {
+      const saved = await appStore.saveUserAddress(newAddress);
+      onAddressSelected(saved);
+      onClose();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Could not save your address. Please try again.');
+    }
   };
 
   const activeZone = zones.find((z) => z.id === selectedZoneId) || zones[0];

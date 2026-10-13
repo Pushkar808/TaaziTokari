@@ -1,98 +1,70 @@
 // ==============================================================================
-// ANTIGRAVITY: PAYMENT GATEWAY WEBHOOK & CRYPTOGRAPHIC VERIFICATION
-// Idempotently fulfills orders upon Razorpay / Cashfree server-to-server events.
-// Never trusts client-side frontend redirect callbacks.
+// RAZORPAY WEBHOOK
+// Server-to-server only. Verifies the signature over the raw body, then marks the
+// order PAID. Never trusts frontend redirect callbacks.
+// The order must be created in Razorpay with notes.order_number = our order number.
 // ==============================================================================
 
-import { Controller, Post, Req, Res, HttpStatus, Logger, Body, Headers } from '@nestjs/common';
+import { Controller, Post, Req, Res, HttpStatus, Logger, Headers, BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
-import * as crypto from 'crypto';
-import { OrderService } from '../orders/order.service';
+import { Public } from '../../common/guards/public.decorator';
+import { PaymentService } from './payment.service';
+import { verifyRazorpaySignature } from './razorpay-signature.util';
 
 @Controller('payments')
 export class PaymentWebhookController {
   private readonly logger = new Logger(PaymentWebhookController.name);
+  private readonly webhookSecret: string;
 
-  constructor(private readonly orderService: OrderService) {}
+  constructor(
+    private readonly paymentService: PaymentService,
+    config: ConfigService
+  ) {
+    // No fallback: the app must not start with a guessable secret.
+    const secret = config.get<string>('RAZORPAY_WEBHOOK_SECRET');
+    if (!secret) throw new Error('RAZORPAY_WEBHOOK_SECRET must be set');
+    this.webhookSecret = secret;
+  }
 
-  /**
-   * Razorpay Webhook Handler
-   * Verifies HMAC-SHA256 signature against RAZORPAY_WEBHOOK_SECRET.
-   */
+  @Public() // authenticated by the Razorpay signature instead of a login token
   @Post('webhook/razorpay')
   async handleRazorpayWebhook(
-    @Req() req: Request,
+    @Req() req: Request & { rawBody?: Buffer },
     @Res() res: Response,
-    @Headers('x-razorpay-signature') signature: string,
-    @Body() body: any
+    @Headers('x-razorpay-signature') signature?: string
   ) {
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || 'whsec_antigravity_midnight_cutoff_lucknow_sha256';
-
-    if (!signature) {
-      this.logger.warn('Webhook rejected: Missing x-razorpay-signature header');
-      return res.status(HttpStatus.BAD_REQUEST).json({ error: 'Missing signature header' });
+    if (!signature || !req.rawBody) {
+      return res.status(HttpStatus.BAD_REQUEST).json({ error: 'Missing signature or body' });
     }
-
-    // Use raw payload string for cryptographic HMAC verification
-    const payload = typeof req.body === 'string' ? req.body : JSON.stringify(body);
-    const expectedSignature = crypto
-      .createHmac('sha256', webhookSecret)
-      .update(payload)
-      .digest('hex');
-
-    // Constant-time buffer comparison to prevent timing attacks
-    const signatureBuffer = Buffer.from(signature, 'utf8');
-    const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
-
-    if (
-      signatureBuffer.length !== expectedBuffer.length ||
-      !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)
-    ) {
-      this.logger.error('Cryptographic signature mismatch on payment webhook! Possible replay or spoofing.');
+    if (!verifyRazorpaySignature(req.rawBody, signature, this.webhookSecret)) {
+      this.logger.error('Webhook signature mismatch. Possible spoofing.');
       return res.status(HttpStatus.UNAUTHORIZED).json({ error: 'Invalid webhook signature' });
     }
 
-    const event = body;
-    this.logger.log(`Received verified Razorpay webhook event: ${event.event}`);
-
-    // Handle payment.captured event
-    if (event.event === 'payment.captured') {
-      const paymentEntity = event.payload?.payment?.entity;
-      const orderId = paymentEntity?.order_id || paymentEntity?.notes?.order_number;
-      const paymentId = paymentEntity?.id;
-
-      if (!orderId || !paymentId) {
-        this.logger.error('Webhook payload missing payment entity or order id');
+    const event = req.body;
+    if (event?.event === 'payment.captured') {
+      const payment = event.payload?.payment?.entity;
+      const orderNumber = payment?.notes?.order_number;
+      if (!orderNumber || !payment?.id || typeof payment.amount !== 'number') {
+        this.logger.error('payment.captured is missing notes.order_number, id or amount');
         return res.status(HttpStatus.BAD_REQUEST).json({ error: 'Incomplete payment payload' });
       }
 
       try {
-        // Idempotently transition order state
-        await this.orderService.markOrderPaid(orderId, paymentId);
-        this.logger.log(`Order ${orderId} successfully confirmed via webhook tx ${paymentId}`);
+        const result = await this.paymentService.markOrderPaid(orderNumber, payment.amount, payment.id);
+        if (result === 'unknown_order') this.logger.error(`Payment ${payment.id} references unknown order ${orderNumber}`);
       } catch (err) {
-        this.logger.error(`Failed to fulfill order ${orderId}: ${(err as Error).message}`);
-        // Return 500 to signal Razorpay to retry delivery later
+        // A mismatch will never succeed on retry; anything else (database down) should be retried.
+        if (err instanceof BadRequestException) {
+          this.logger.error(err.message);
+          return res.status(HttpStatus.BAD_REQUEST).json({ error: 'Payment amount mismatch' });
+        }
+        this.logger.error(`Failed to mark ${orderNumber} paid: ${(err as Error).message}`);
         return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: 'Fulfillment retry needed' });
       }
     }
 
-    return res.status(HttpStatus.OK).json({ status: 'received', timestamp: new Date().toISOString() });
-  }
-
-  /**
-   * Test harness helper to compute expected HMAC for development & QA simulation
-   */
-  @Post('webhook/simulate')
-  async simulateWebhook(@Body() body: any) {
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || 'whsec_antigravity_midnight_cutoff_lucknow_sha256';
-    const payload = JSON.stringify(body);
-    const signature = crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex');
-
-    return {
-      message: 'Simulated payload signature generated',
-      signature,
-      payload,
-    };
+    return res.status(HttpStatus.OK).json({ status: 'received' });
   }
 }

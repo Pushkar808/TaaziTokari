@@ -1,32 +1,29 @@
-import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
-import { Request } from 'express';
+import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { JwtService } from '@nestjs/jwt';
+import { IS_PUBLIC_KEY } from './public.decorator';
+import { AuthUser } from './auth-user';
 
+/** Global guard: every route needs a valid Bearer token unless it is marked @Public(). */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<Request>();
+  constructor(private readonly reflector: Reflector, private readonly jwt: JwtService) {}
 
-    // 1. Extract token from Bearer header or HttpOnly cookie
-    let token = '';
-    const authHeader = request.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-    } else if (request.cookies && request.cookies['antigravity_access_token']) {
-      token = request.cookies['antigravity_access_token'];
-    }
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [context.getHandler(), context.getClass()]);
+    if (isPublic) return true;
 
-    if (!token) {
-      throw new UnauthorizedException('Authentication required: Missing access token');
-    }
+    const request = context.switchToHttp().getRequest();
+    const header: string = request.headers.authorization ?? '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    if (!token) throw new UnauthorizedException('Please sign in.');
 
     try {
-      // In production NestJS, jwtService.verify(token) is invoked here.
-      // Mocked signature extraction for demo verification:
-      const payload = JSON.parse(Buffer.from(token.split('.')[1] || '{}', 'base64').toString());
-      (request as any).user = payload;
-      return true;
-    } catch (err) {
-      throw new UnauthorizedException('Invalid or expired JWT token');
+      const payload = await this.jwt.verifyAsync<{ sub: string; role: AuthUser['role'] }>(token);
+      request.user = { id: payload.sub, role: payload.role } satisfies AuthUser;
+    } catch {
+      throw new UnauthorizedException('Your session has expired. Please sign in again.');
     }
+    return true;
   }
 }

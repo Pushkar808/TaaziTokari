@@ -1,50 +1,28 @@
-// ==============================================================================
-// ANTIGRAVITY: NESTJS PRODUCTION BOOTSTRAP
-// Modular Monolith API Gateway with Helmet, Strict CORS, and Throttling
-// ==============================================================================
+// Taazi Tokari API: NestJS bootstrap. All routes live under /api.
 
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
 import helmet from 'helmet';
-import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const logger = new Logger('AntigravityBootstrap');
   const app = await NestFactory.create(AppModule, {
-    // Preserve raw body for cryptographic HMAC SHA-256 webhook verification
+    // Preserve the raw body for Razorpay webhook signature verification
     rawBody: true,
   });
+  // Lets Prisma release its database connections when the process is stopped or restarted.
+  app.enableShutdownHooks();
+
+  app.setGlobalPrefix('api');
+  app.use(helmet());
+  app.enableCors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000' });
+
+  // Rejects malformed bodies and strips any field a DTO does not declare.
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   const port = process.env.PORT || 4000;
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-
-  // 1. Helmet Security Middleware (HSTS, X-Content-Type-Options, Frameguard)
-  app.use(helmet());
-
-  // 2. Cookie Parser for HttpOnly Refresh Tokens
-  app.use(cookieParser());
-
-  // 3. Strict CORS lock down to production domains
-  app.enableCors({
-    origin: [frontendUrl, 'https://taazitokari.in', 'https://admin.taazitokari.in'],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-razorpay-signature'],
-  });
-
-  // 4. Global Validation Pipe (strip unexpected fields)
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      forbidNonWhitelisted: true,
-    })
-  );
-
   await app.listen(port);
-  logger.log(`🚀 Antigravity Modular Monolith API running on http://localhost:${port}`);
-  logger.log(`🔒 Midnight Cutoff Worker active on BullMQ Redis queue`);
+  new Logger('Bootstrap').log(`Taazi Tokari API running on http://localhost:${port}/api`);
 }
 
 bootstrap();

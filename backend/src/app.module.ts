@@ -1,69 +1,44 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { BullModule } from '@nestjs/bullmq';
-import { APP_GUARD } from '@nestjs/core';
-
-import { PrismaService } from './prisma/prisma.service';
-import { OrderService } from './modules/orders/order.service';
-import { PaymentWebhookController } from './modules/payments/payment-webhook.controller';
-import { ProcurementService } from './modules/procurement/procurement.service';
-import { CutoffProcessor } from './modules/cutoff/cutoff.processor';
-import { AuditService } from './common/audit/audit.service';
-import { RolesGuard } from './common/guards/roles.guard';
+import { ConfigModule } from '@nestjs/config';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { AdminGuard } from './common/guards/admin.guard';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { CommonModule } from './common/common.module';
+import { PrismaExceptionFilter } from './common/prisma-exception.filter';
+import { PrismaModule } from './prisma/prisma.module';
+import { AddressesModule } from './modules/addresses/addresses.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { CatalogModule } from './modules/catalog/catalog.module';
+import { CouponsModule } from './modules/coupons/coupons.module';
+import { OrdersModule } from './modules/orders/orders.module';
+import { PaymentsModule } from './modules/payments/payments.module';
 
 @Module({
   imports: [
-    // Environment Configuration
-    ConfigModule.forRoot({
-      isGlobal: true,
-      envFilePath: '.env',
-    }),
+    // The real .env sits in the repo root; the backend may also have its own.
+    ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env', '../.env'] }),
 
-    // Rate Limiting & Hardening: 5 requests per minute per IP for sensitive endpoints
-    ThrottlerModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: () => [
-        {
-          ttl: 60000, // 60 seconds
-          limit: 100, // Global limit
-        },
-      ],
-    }),
+    // Global rate limit: 100 requests per minute per IP
+    ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
 
-    // BullMQ with Redis 7 for scheduled midnight cutoff
-    BullModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        connection: {
-          host: config.get<string>('REDIS_HOST', 'localhost'),
-          port: config.get<number>('REDIS_PORT', 6379),
-          password: config.get<string>('REDIS_PASSWORD', 'antigravity_redis_pass'),
-        },
-      }),
-    }),
-
-    BullModule.registerQueue({
-      name: 'midnight-cutoff-queue',
-    }),
+    PrismaModule,
+    CommonModule,
+    AuthModule,
+    CatalogModule,
+    AddressesModule,
+    CouponsModule,
+    OrdersModule,
+    AdminModule,
+    PaymentsModule,
   ],
-  controllers: [PaymentWebhookController],
   providers: [
-    PrismaService,
-    AuditService,
-    OrderService,
-    ProcurementService,
-    CutoffProcessor,
-    {
-      provide: APP_GUARD,
-      useClass: ThrottlerGuard,
-    },
-    {
-      provide: APP_GUARD,
-      useClass: RolesGuard,
-    },
+    // Guards run in this order: rate limit, then login check, then admin check.
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: AdminGuard },
+    { provide: APP_FILTER, useClass: PrismaExceptionFilter },
   ],
 })
 export class AppModule {}

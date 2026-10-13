@@ -39,7 +39,9 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const [notifications] = useState(appStore.getNotifications());
   const [activeAddress, setActiveAddress] = useState<CustomerAddress | null>(appStore.getActiveAddress());
   const [cart, setCart] = useState<Record<string, number>>(appStore.getCart());
-  const [orders, setOrders] = useState<CustomerOrder[]>(appStore.getOrders());
+  // Admins also receive every customer's orders, so keep only this user's here
+  const myOrders = () => appStore.getOrders().filter((o) => o.userId === currentUser?.id);
+  const [orders, setOrders] = useState<CustomerOrder[]>(myOrders());
 
   // UI state
   const [selectedCategorySlug, setSelectedCategorySlug] = useState('all');
@@ -51,6 +53,11 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const [deliveryNotes, setDeliveryNotes] = useState('');
   const [orderConfirmed, setOrderConfirmed] = useState<CustomerOrder | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Coupon: the code box text, and the code the server accepted (with its discount for this subtotal).
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState<{ code: string; description: string; discount: number } | null>(null);
+  const [isCheckingCoupon, setIsCheckingCoupon] = useState(false);
 
   // Feedback prompt state
   const [feedbackOrder, setFeedbackOrder] = useState<CustomerOrder | null>(null);
@@ -70,10 +77,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
 
   // Check for delivered orders requiring feedback
   useEffect(() => {
-    const userOrders = currentUser
-      ? orders.filter((o) => o.userId === currentUser.id)
-      : orders;
-    const delivered = userOrders.find(
+    const delivered = orders.find(
       (o) => o.orderStatus === 'DELIVERED' && !o.feedbackSubmitted
     );
     if (delivered) {
@@ -137,7 +141,50 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   const activeZone = appStore.getDeliveryZones().find((z) => z.id === activeAddress?.zoneId) || appStore.getDeliveryZones()[0];
   const isDeliveryFree = cartSubtotal >= (activeZone?.minOrderFreeDelivery || 199);
   const deliveryFee = cartSubtotal > 0 ? (isDeliveryFree ? 0 : activeZone?.deliveryFee || 25) : 0;
-  const grandTotal = cartSubtotal + deliveryFee;
+  const couponDiscount = cartSubtotal > 0 ? appliedCoupon?.discount ?? 0 : 0;
+  const grandTotal = cartSubtotal - couponDiscount + deliveryFee;
+
+  const handleApplyCoupon = async () => {
+    if (!currentUser) {
+      showToast('Please sign in to use a coupon.');
+      onOpenAuth();
+      return;
+    }
+    if (!couponInput.trim()) return;
+    setIsCheckingCoupon(true);
+    try {
+      setAppliedCoupon(await appStore.validateCoupon(couponInput, cartSubtotal));
+      setCouponInput('');
+    } catch (err: any) {
+      showToast(err.message || 'Could not apply this coupon.');
+    } finally {
+      setIsCheckingCoupon(false);
+    }
+  };
+
+  // The discount depends on the subtotal, so ask the server again whenever the cart changes.
+  useEffect(() => {
+    if (!appliedCoupon) return;
+    if (cartSubtotal === 0) {
+      setAppliedCoupon(null);
+      return;
+    }
+    let stale = false;
+    appStore
+      .validateCoupon(appliedCoupon.code, cartSubtotal, true)
+      .then((result) => {
+        if (!stale) setAppliedCoupon(result);
+      })
+      .catch((err: any) => {
+        if (stale) return;
+        setAppliedCoupon(null);
+        showToast(err.message || 'Coupon removed.');
+      });
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cartSubtotal]);
 
   // Filtered products list
   const filteredProducts = useMemo(() => {
@@ -168,7 +215,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
   }, [products, selectedCategorySlug, searchQuery]);
 
   // Handle Checkout submission
-  const handlePlaceOrder = () => {
+  const handlePlaceOrder = async () => {
     if (!currentUser) {
       showToast('Please sign in or register to place your order.');
       onOpenAuth();
@@ -188,56 +235,40 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
 
     const selectedSlot = slots.find((s) => s.id === selectedSlotId) || slots[0];
 
-    const orderPayload = {
-      userId: currentUser.id,
-      customerName: currentUser.fullName,
-      customerPhone: currentUser.phoneNumber || activeAddress.phoneNumber,
-      deliveryAddress: activeAddress,
-      deliverySlot: selectedSlot,
-      items: cartLineItems.map((ci) => ({
-        productId: ci.productId,
-        nameEn: ci.product.nameEn,
-        nameHi: ci.product.nameHi,
-        unit: ci.product.unit,
-        price: ci.product.price,
-        mrp: ci.product.mrp,
-        quantity: ci.quantity,
-        itemTotal: ci.itemTotal,
-        imageUrl: ci.product.imageUrl,
-      })),
-      subtotal: cartSubtotal,
-      deliveryFee,
-      savingsTotal: cartSavings,
-      grandTotal,
-      paymentMethod,
-      paymentStatus: (paymentMethod === 'ONLINE_RAZORPAY' ? 'PAID' : 'PENDING') as 'PAID' | 'PENDING',
-      orderStatus: 'PLACED' as const,
-      deliveryNotes: deliveryNotes.trim() || undefined,
-    };
-
-    const created = appStore.createOrder(orderPayload);
-    setCart({});
-    setProducts(appStore.getProducts());
-    setOrders(appStore.getOrders());
-    setIsCartOpen(false);
-    setOrderConfirmed(created);
+    // The server prices the order and deducts stock, so only ids and quantities are sent.
+    try {
+      const created = await appStore.placeOrder({
+        slotId: selectedSlot.id,
+        paymentMethod,
+        deliveryNotes: deliveryNotes.trim() || undefined,
+        couponCode: appliedCoupon?.code,
+        items: cartLineItems.map((ci) => ({ productId: ci.productId, quantity: ci.quantity })),
+      });
+      setCart({});
+      setAppliedCoupon(null);
+      setCouponInput('');
+      setProducts(appStore.getProducts());
+      setOrders(myOrders());
+      setIsCartOpen(false);
+      setOrderConfirmed(created);
+    } catch (err: any) {
+      showToast(err.message || 'Could not place your order. Please try again.');
+      setProducts(appStore.getProducts());
+    }
   };
 
   // Handle Feedback Submission
-  const handleSubmitFeedback = (e: React.FormEvent) => {
+  const handleSubmitFeedback = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!feedbackOrder) return;
-    appStore.submitFeedback({
-      orderId: feedbackOrder.id,
-      orderNumber: feedbackOrder.orderNumber,
-      userId: currentUser?.id || feedbackOrder.userId,
-      customerName: currentUser?.fullName || feedbackOrder.customerName,
-      rating: feedbackRating,
-      comment: feedbackComment.trim(),
-    });
-    setOrders(appStore.getOrders());
-    setFeedbackOrder(null);
-    showToast('Dhanyawad! Your feedback helps us maintain fresh quality.');
+    try {
+      await appStore.submitFeedback(feedbackOrder.id, feedbackRating, feedbackComment.trim());
+      setOrders(myOrders());
+      setFeedbackOrder(null);
+      showToast('Dhanyawad! Your feedback helps us maintain fresh quality.');
+    } catch (err: any) {
+      showToast(err.message || 'Could not submit feedback.');
+    }
   };
 
   return (
@@ -321,13 +352,15 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
               )}
 
               {/* Order History */}
-              <button
-                onClick={() => setIsOrdersOpen(true)}
-                className="bg-[#0e3b23] hover:bg-[#155030] border border-[#236841] text-white px-3 py-1.5 rounded-xl text-xs font-bold transition-all hidden sm:flex items-center gap-1.5"
-              >
-                <span>📦</span>
-                <span>My Orders</span>
-              </button>
+              {currentUser && (
+                <button
+                  onClick={() => setIsOrdersOpen(true)}
+                  className="bg-[#0e3b23] hover:bg-[#155030] border border-[#236841] text-white px-3 py-1.5 rounded-xl text-xs font-bold transition-all hidden sm:flex items-center gap-1.5"
+                >
+                  <span>📦</span>
+                  <span>My Orders</span>
+                </button>
+              )}
 
               {/* Cart Button */}
               <button
@@ -873,12 +906,62 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                     </div>
                   </div>
 
+                  {/* Cut-off notice: after the zone cut-off an order counts for the next day */}
+                  {activeZone?.cutoffTime && (
+                    <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                      ⏰ Orders placed after {activeZone.cutoffTime} are treated as the next day&apos;s order.
+                    </p>
+                  )}
+
+                  {/* Coupon */}
+                  <div className="space-y-1.5">
+                    {appliedCoupon ? (
+                      <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 rounded-2xl px-3 py-2 text-xs">
+                        <span className="text-emerald-800">
+                          🎟️ <strong>{appliedCoupon.code}</strong> applied
+                          {appliedCoupon.description ? ` • ${appliedCoupon.description}` : ''}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setAppliedCoupon(null)}
+                          className="text-red-600 font-bold hover:underline"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={couponInput}
+                          onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                          placeholder="Have a coupon code?"
+                          className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-xs uppercase"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleApplyCoupon}
+                          disabled={isCheckingCoupon || !couponInput.trim()}
+                          className="px-4 py-2 bg-emerald-700 text-white text-xs font-bold rounded-xl disabled:opacity-50"
+                        >
+                          {isCheckingCoupon ? '...' : 'Apply'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Price Breakdown */}
                   <div className="bg-gray-50 rounded-2xl p-4 space-y-2 border border-gray-200 text-xs">
                     <div className="flex justify-between text-gray-600">
                       <span>Item Total:</span>
                       <span>₹{cartSubtotal}</span>
                     </div>
+                    {couponDiscount > 0 && (
+                      <div className="flex justify-between text-emerald-700 font-bold">
+                        <span>Coupon discount ({appliedCoupon?.code}):</span>
+                        <span>-₹{couponDiscount}</span>
+                      </div>
+                    )}
                     <div className="flex justify-between text-gray-600">
                       <span>Delivery Fee:</span>
                       <span>{isDeliveryFree ? <strong className="text-emerald-700 font-bold">FREE</strong> : `₹${deliveryFee}`}</span>
@@ -939,6 +1022,10 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
 
             <div className="bg-gray-50 rounded-2xl p-4 text-left text-xs space-y-2 border border-gray-200">
               <div className="flex justify-between">
+                <span className="text-gray-500">Order day:</span>
+                <span className="font-bold text-gray-900">{orderConfirmed.orderDate}</span>
+              </div>
+              <div className="flex justify-between">
                 <span className="text-gray-500">Delivery Slot:</span>
                 <span className="font-bold text-gray-900">{orderConfirmed.deliverySlot.title}</span>
               </div>
@@ -952,6 +1039,12 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                 <span className="text-gray-500">Items:</span>
                 <span className="font-bold text-gray-900">{orderConfirmed.items.length} produce varieties</span>
               </div>
+              {orderConfirmed.discountTotal > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Coupon {orderConfirmed.couponCode}:</span>
+                  <span className="font-bold text-emerald-700">-₹{orderConfirmed.discountTotal}</span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-gray-500">Payment:</span>
                 <span className="font-bold text-emerald-800">
@@ -971,7 +1064,7 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
       )}
 
       {/* ORDER HISTORY & TRACKING MODAL */}
-      {isOrdersOpen && (
+      {currentUser && isOrdersOpen && (
         <div className="fixed inset-0 z-[150] bg-black/60 backdrop-blur-sm flex justify-center items-center p-4 animate-fadeIn">
           <div
             className="bg-white rounded-3xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-gray-200 overflow-hidden"
@@ -1055,6 +1148,11 @@ export const CustomerPortal: React.FC<CustomerPortalProps> = ({
                           </div>
                         ))}
                       </div>
+                      {ord.discountTotal > 0 && (
+                        <p className="text-[11px] text-emerald-700 font-bold">
+                          Coupon {ord.couponCode}: -₹{ord.discountTotal}
+                        </p>
+                      )}
 
                       <div className="pt-2 border-t border-gray-200 flex justify-between items-center text-xs">
                         <span className="text-gray-500">

@@ -6,7 +6,8 @@
 // Customer Feedback, Date filtering, and CSV export.
 // ==============================================================================
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import type { BusinessMetrics } from '../../services/api/admin';
 import {
   ProductItem,
   ProductCategory,
@@ -15,6 +16,8 @@ import {
   ExpenseRecord,
   CustomerOrder,
   NotificationOffer,
+  Coupon,
+  StaffMember,
   DeliveryZone,
   CustomerFeedback,
   AuditLogRecord,
@@ -22,6 +25,11 @@ import {
   appStore,
 } from '../../services/store';
 import { TaaziTokariEmblem } from '../BrandLogo';
+import { busy } from '../../services/api/http';
+import { AdminGraphs, GRAPH_SECTIONS } from './charts';
+
+const ADMIN_VIEW_KEY = 'taazi_admin_view';
+const ORDERS_REFRESH_MS = import.meta.env.DEV ? 30_000 : 60_000;
 
 export type AdminSection =
   | 'dashboard'
@@ -31,6 +39,8 @@ export type AdminSection =
   | 'sales'
   | 'expenses'
   | 'notifications'
+  | 'coupons'
+  | 'staff'
   | 'orders'
   | 'delivery-settings'
   | 'feedback'
@@ -59,6 +69,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [expenses, setExpenses] = useState<ExpenseRecord[]>(appStore.getExpenses());
   const [orders, setOrders] = useState<CustomerOrder[]>(appStore.getOrders());
   const [notifications, setNotifications] = useState<NotificationOffer[]>(appStore.getNotifications());
+  const [coupons, setCoupons] = useState<Coupon[]>(appStore.getCoupons());
+  const [staff, setStaff] = useState<StaffMember[]>(appStore.getStaff());
+  const [zoneCutoffs, setZoneCutoffs] = useState<Record<string, string>>({});
   const [zones, setZones] = useState<DeliveryZone[]>(appStore.getDeliveryZones());
   const [feedback, setFeedback] = useState<CustomerFeedback[]>(appStore.getFeedback());
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>(appStore.getAuditLogs());
@@ -70,6 +83,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [isSaleModalOpen, setIsSaleModalOpen] = useState(false);
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [isNotificationModalOpen, setIsNotificationModalOpen] = useState(false);
+  const [isCouponModalOpen, setIsCouponModalOpen] = useState(false);
   const [viewingOrder, setViewingOrder] = useState<CustomerOrder | null>(null);
 
   // --- Form States for Quick Actions ---
@@ -114,6 +128,34 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   const [notifMessage, setNotifMessage] = useState('');
   const [notifType, setNotifType] = useState<NotificationOffer['type']>('ANNOUNCEMENT');
 
+  // 6. Coupon Form
+  const [cpCode, setCpCode] = useState('');
+  const [cpDescription, setCpDescription] = useState('');
+  const [cpType, setCpType] = useState<Coupon['discountType']>('FLAT');
+  const [cpValue, setCpValue] = useState(50);
+  const [cpMinOrder, setCpMinOrder] = useState(0);
+  const [cpMaxDiscount, setCpMaxDiscount] = useState('');
+  const [cpExpires, setCpExpires] = useState('');
+  const [cpUsageLimit, setCpUsageLimit] = useState('');
+  const [cpPerUser, setCpPerUser] = useState(1);
+  const [cpFirstOrder, setCpFirstOrder] = useState(false);
+  const [isZoneModalOpen, setIsZoneModalOpen] = useState(false);
+  const [editingZone, setEditingZone] = useState<DeliveryZone | null>(null);
+  const [editingNotif, setEditingNotif] = useState<NotificationOffer | null>(null);
+  const [editingCoupon, setEditingCoupon] = useState<Coupon | null>(null);
+  const [zoneActive, setZoneActive] = useState(true);
+  const [zoneName, setZoneName] = useState('');
+  const [zonePincodes, setZonePincodes] = useState('');
+  const [zoneFee, setZoneFee] = useState(25);
+  const [zoneFreeAbove, setZoneFreeAbove] = useState(199);
+  const [zoneCutoff, setZoneCutoff] = useState('22:00');
+
+  // 7. Operations login form
+  const [staffName, setStaffName] = useState('');
+  const [staffEmail, setStaffEmail] = useState('');
+  const [staffPhone, setStaffPhone] = useState('');
+  const [staffPassword, setStaffPassword] = useState('');
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
@@ -128,15 +170,104 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setExpenses(appStore.getExpenses());
     setOrders(appStore.getOrders());
     setNotifications(appStore.getNotifications());
+    setCoupons(appStore.getCoupons());
+    setStaff(appStore.getStaff());
     setZones(appStore.getDeliveryZones());
     setFeedback(appStore.getFeedback());
     setAuditLogs(appStore.getAuditLogs());
   };
 
-  // Financial Metrics computed from store
-  const metrics = useMemo(() => {
-    return appStore.getBusinessMetrics(dateFilter);
-  }, [purchases, manualSales, expenses, orders, products, dateFilter]);
+  // Financial metrics are computed server-side for the selected day
+  const [metrics, setMetrics] = useState<BusinessMetrics>({
+    targetDate: dateFilter,
+    totalSalesRevenue: 0,
+    onlineSalesRevenue: 0,
+    manualSalesRevenue: 0,
+    totalPurchaseSpending: 0,
+    totalOperatingExpenses: 0,
+    cogs: 0,
+    estimatedGrossProfit: 0,
+    estimatedNetOperatingProfit: 0,
+    totalInventoryValue: 0,
+    lowStockCount: 0,
+    orderCount: 0,
+  });
+  const [refreshTick, setRefreshTick] = useState(0);
+  useEffect(() => {
+    appStore.getBusinessMetrics(dateFilter).then(setMetrics).catch((err) => showToast(err.message));
+  }, [purchases, manualSales, expenses, orders, products, dateFilter, refreshTick]);
+
+  // Graph/table switch (remembered), manual refresh, and live polling
+  const [graphMode, setGraphMode] = useState(() => localStorage.getItem(ADMIN_VIEW_KEY) === 'graph');
+  const [ordersAutoRefresh, setOrdersAutoRefresh] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(() => new Date());
+  const showGraphs = graphMode && GRAPH_SECTIONS.includes(activeSection);
+
+  const toggleGraphMode = (graph: boolean) => {
+    setGraphMode(graph);
+    localStorage.setItem(ADMIN_VIEW_KEY, graph ? 'graph' : 'table');
+  };
+
+  // Reloads everything from the server; every tab reads the same data, so this refreshes whichever is open.
+  const reloadFromServer = async () => {
+    await appStore.reload();
+    refreshData();
+    setRefreshTick((t) => t + 1);
+    setLastUpdated(new Date());
+  };
+
+  const handleRefresh = async () => {
+    try {
+      await reloadFromServer();
+      showToast('Refreshed.');
+    } catch (err: any) {
+      showToast(err.message || 'Could not refresh. Please try again.');
+    }
+  };
+
+  const anyModalOpen =
+    isAddProductOpen ||
+    isPurchaseModalOpen ||
+    isSaleModalOpen ||
+    isExpenseModalOpen ||
+    isNotificationModalOpen ||
+    isCouponModalOpen ||
+    isZoneModalOpen ||
+    viewingOrder !== null;
+
+  // Auto-refresh runs only while the Orders tab is open and its switch is on.
+  useEffect(() => {
+    if (activeSection !== 'orders' || !ordersAutoRefresh || anyModalOpen) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      busy.runSilent(reloadFromServer).catch(() => {
+        /* a missed background refresh is not worth a toast; the next tick retries */
+      });
+    }, ORDERS_REFRESH_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ordersAutoRefresh, activeSection, anyModalOpen]);
+
+  const ordersAutoRefreshSwitch = (
+    <label className="flex items-center gap-2 text-xs font-semibold text-gray-700 cursor-pointer">
+      <input type="checkbox" checked={ordersAutoRefresh} onChange={(e) => setOrdersAutoRefresh(e.target.checked)} />
+      <span>Auto-refresh (every {ORDERS_REFRESH_MS / 1000 >= 60 ? '1 min' : `${ORDERS_REFRESH_MS / 1000}s`})</span>
+      <span className="text-gray-400 font-normal">Updated {lastUpdated.toLocaleTimeString()}</span>
+    </label>
+  );
+
+  // Runs a server action, then refreshes the screen; failures are shown as a toast.
+  const runAction = async (action: () => Promise<void>, successMessage: string): Promise<boolean> => {
+    try {
+      await action();
+      refreshData();
+      showToast(successMessage);
+      return true;
+    } catch (err: any) {
+      showToast(err.message || 'Something went wrong. Please try again.');
+      return false;
+    }
+  };
 
   // Security Check: If user is not admin, block rendering
   if (!currentUser || currentUser.role !== 'admin') {
@@ -162,7 +293,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   // --- Handlers for 4 Core Actions ---
 
   // Action 1: Add or Edit Product
-  const handleSaveProduct = (e: React.FormEvent) => {
+  const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prodNameEn.trim()) {
       showToast('Please provide an English name for the produce.');
@@ -191,11 +322,11 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    appStore.saveProduct(payload);
-    refreshData();
-    setIsAddProductOpen(false);
-    setEditingProduct(null);
-    showToast(`Product ${payload.nameEn} saved successfully.`);
+    const saved = await runAction(() => appStore.saveProduct(payload), `Product ${payload.nameEn} saved successfully.`);
+    if (saved) {
+      setIsAddProductOpen(false);
+      setEditingProduct(null);
+    }
   };
 
   const handleOpenEditProduct = (prod: ProductItem) => {
@@ -217,7 +348,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
   };
 
   // Action 2: Record Purchase (Increments stock & updates weighted cost)
-  const handleRecordPurchase = (e: React.FormEvent) => {
+  const handleRecordPurchase = async (e: React.FormEvent) => {
     e.preventDefault();
     const prod = products.find((p) => p.id === purProductId);
     if (!prod) {
@@ -225,25 +356,23 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       return;
     }
 
-    appStore.recordPurchase({
-      date: dateFilter,
-      productId: prod.id,
-      productName: prod.nameEn,
-      quantity: Number(purQuantity),
-      unit: prod.unit,
-      totalCost: Number(purTotalCost),
-      supplierName: purSupplier.trim(),
-      notes: purNotes.trim(),
-      recordedBy: currentUser.fullName,
-    });
-
-    refreshData();
-    setIsPurchaseModalOpen(false);
-    showToast(`Recorded purchase of ${purQuantity} ${prod.unit} of ${prod.nameEn}. Stock updated!`);
+    const saved = await runAction(
+      () =>
+        appStore.recordPurchase({
+          date: dateFilter,
+          productId: prod.id,
+          quantity: Number(purQuantity),
+          totalCost: Number(purTotalCost),
+          supplierName: purSupplier.trim(),
+          notes: purNotes.trim(),
+        }),
+      `Recorded purchase of ${purQuantity} ${prod.unit} of ${prod.nameEn}. Stock updated!`
+    );
+    if (saved) setIsPurchaseModalOpen(false);
   };
 
   // Action 3: Record Manual Sale (Decrements stock & updates revenue)
-  const handleRecordSale = (e: React.FormEvent) => {
+  const handleRecordSale = async (e: React.FormEvent) => {
     e.preventDefault();
     const prod = products.find((p) => p.id === saleProductId);
     if (!prod) {
@@ -251,68 +380,240 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       return;
     }
 
-    appStore.recordManualSale({
-      date: dateFilter,
-      productId: prod.id,
-      productName: prod.nameEn,
-      quantity: Number(saleQuantity),
-      unit: prod.unit,
-      sellingPrice: Number(salePrice),
-      notes: saleNotes.trim(),
-      recordedBy: currentUser.fullName,
-    });
-
-    refreshData();
-    setIsSaleModalOpen(false);
-    showToast(`Recorded sale of ${saleQuantity} ${prod.unit} of ${prod.nameEn}. Stock updated!`);
+    const saved = await runAction(
+      () =>
+        appStore.recordManualSale({
+          date: dateFilter,
+          productId: prod.id,
+          quantity: Number(saleQuantity),
+          sellingPrice: Number(salePrice),
+          notes: saleNotes.trim(),
+        }),
+      `Recorded sale of ${saleQuantity} ${prod.unit} of ${prod.nameEn}. Stock updated!`
+    );
+    if (saved) setIsSaleModalOpen(false);
   };
 
   // Action 4: Add Expense
-  const handleRecordExpense = (e: React.FormEvent) => {
+  const handleRecordExpense = async (e: React.FormEvent) => {
     e.preventDefault();
-    appStore.recordExpense({
-      date: dateFilter,
-      category: expCategory,
-      amount: Number(expAmount),
-      notes: expNotes.trim(),
-      recordedBy: currentUser.fullName,
-    });
-
-    refreshData();
-    setIsExpenseModalOpen(false);
-    showToast(`Recorded ${expCategory} expense of ₹${expAmount}.`);
+    const saved = await runAction(
+      () =>
+        appStore.recordExpense({
+          date: dateFilter,
+          category: expCategory,
+          amount: Number(expAmount),
+          notes: expNotes.trim(),
+          recordedBy: currentUser.fullName,
+        }),
+      `Recorded ${expCategory} expense of ₹${expAmount}.`
+    );
+    if (saved) setIsExpenseModalOpen(false);
   };
 
   // Notification creation
-  const handleCreateNotification = (e: React.FormEvent) => {
+  const handleCreateNotification = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!notifTitle.trim() || !notifMessage.trim()) return;
 
-    appStore.saveNotification({
-      id: `notif-${Date.now()}`,
-      title: notifTitle.trim(),
-      message: notifMessage.trim(),
-      type: notifType,
-      isActive: true,
-      priority: 1,
-      createdAt: new Date().toISOString(),
-    });
+    const saved = await runAction(
+      () =>
+        appStore.saveNotification({
+          id: editingNotif?.id ?? `new-${Date.now()}`, // new ids are replaced by a database id on insert
+          title: notifTitle.trim(),
+          message: notifMessage.trim(),
+          type: notifType,
+          isActive: editingNotif?.isActive ?? true,
+          priority: editingNotif?.priority ?? 1,
+          bannerImageUrl: editingNotif?.bannerImageUrl,
+          actionText: editingNotif?.actionText,
+          actionUrl: editingNotif?.actionUrl,
+          createdAt: editingNotif?.createdAt ?? new Date().toISOString(),
+        }),
+      editingNotif ? 'Announcement updated.' : 'Published announcement to customer store.'
+    );
+    if (saved) {
+      setIsNotificationModalOpen(false);
+      setEditingNotif(null);
+      setNotifTitle('');
+      setNotifMessage('');
+    }
+  };
 
-    refreshData();
-    setIsNotificationModalOpen(false);
+  const openNewNotification = () => {
+    setEditingNotif(null);
     setNotifTitle('');
     setNotifMessage('');
-    showToast('Published announcement to customer store.');
+    setNotifType('ANNOUNCEMENT');
+    setIsNotificationModalOpen(true);
+  };
+
+  const openEditNotification = (n: NotificationOffer) => {
+    setEditingNotif(n);
+    setNotifTitle(n.title);
+    setNotifMessage(n.message);
+    setNotifType(n.type);
+    setIsNotificationModalOpen(true);
+  };
+
+  // Delivery zone creation
+  const handleCreateZone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const pincodes = [...new Set(zonePincodes.split(/[\s,]+/).filter(Boolean))];
+    if (!zoneName.trim()) return;
+    if (pincodes.length === 0 || pincodes.some((p) => !/^\d{6}$/.test(p))) {
+      showToast('Enter one or more 6-digit pincodes, separated by commas.');
+      return;
+    }
+    const saved = await runAction(
+      () =>
+        editingZone
+          ? appStore.saveZone({
+              ...editingZone,
+              name: zoneName.trim(),
+              pincodes,
+              deliveryFee: Number(zoneFee),
+              minOrderFreeDelivery: Number(zoneFreeAbove),
+              cutoffTime: zoneCutoff,
+              isActive: zoneActive,
+            })
+          : appStore.createZone({
+              name: zoneName.trim(),
+              pincodes,
+              deliveryFee: Number(zoneFee),
+              minOrderFreeDelivery: Number(zoneFreeAbove),
+              cutoffTime: zoneCutoff,
+              isActive: true,
+            }),
+      editingZone ? `Zone ${zoneName.trim()} updated.` : `Zone ${zoneName.trim()} added.`
+    );
+    if (saved) {
+      setIsZoneModalOpen(false);
+      setEditingZone(null);
+      setZoneName('');
+      setZonePincodes('');
+    }
+  };
+
+  const openNewZone = () => {
+    setEditingZone(null);
+    setZoneName('');
+    setZonePincodes('');
+    setZoneFee(25);
+    setZoneFreeAbove(199);
+    setZoneCutoff('22:00');
+    setZoneActive(true);
+    setIsZoneModalOpen(true);
+  };
+
+  const openEditZone = (z: DeliveryZone) => {
+    setEditingZone(z);
+    setZoneName(z.name);
+    setZonePincodes(z.pincodes.join(', '));
+    setZoneFee(z.deliveryFee);
+    setZoneFreeAbove(z.minOrderFreeDelivery);
+    setZoneCutoff(z.cutoffTime);
+    setZoneActive(z.isActive);
+    setIsZoneModalOpen(true);
+  };
+
+  // Coupon creation
+  const handleCreateCoupon = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!cpCode.trim()) return;
+
+    const saved = await runAction(
+      () =>
+        appStore.saveCoupon({
+          id: editingCoupon?.id ?? `new-${Date.now()}`, // new ids are replaced by a database id on insert
+          code: cpCode.trim(),
+          description: cpDescription.trim(),
+          discountType: cpType,
+          discountValue: cpValue,
+          minOrderAmount: cpMinOrder,
+          maxDiscount: cpType === 'PERCENT' && cpMaxDiscount ? Number(cpMaxDiscount) : undefined,
+          // Valid through the end of the chosen day.
+          expiresAt: cpExpires ? new Date(`${cpExpires}T23:59:59`).toISOString() : undefined,
+          usageLimit: cpUsageLimit ? Number(cpUsageLimit) : undefined,
+          perUserLimit: cpPerUser,
+          firstOrderOnly: cpFirstOrder,
+          isActive: editingCoupon?.isActive ?? true,
+        }),
+      editingCoupon ? `Updated coupon ${cpCode.trim().toUpperCase()}.` : `Created coupon ${cpCode.trim().toUpperCase()}.`
+    );
+    if (saved) {
+      setIsCouponModalOpen(false);
+      setEditingCoupon(null);
+      setCpCode('');
+      setCpDescription('');
+      setCpMaxDiscount('');
+      setCpExpires('');
+      setCpUsageLimit('');
+    }
+  };
+
+  const openNewCoupon = () => {
+    setEditingCoupon(null);
+    setCpCode('');
+    setCpDescription('');
+    setCpType('FLAT');
+    setCpValue(50);
+    setCpMinOrder(0);
+    setCpMaxDiscount('');
+    setCpExpires('');
+    setCpUsageLimit('');
+    setCpPerUser(1);
+    setCpFirstOrder(false);
+    setIsCouponModalOpen(true);
+  };
+
+  const openEditCoupon = (c: Coupon) => {
+    const expiry = c.expiresAt ? new Date(c.expiresAt) : null;
+    setEditingCoupon(c);
+    setCpCode(c.code);
+    setCpDescription(c.description);
+    setCpType(c.discountType);
+    setCpValue(c.discountValue);
+    setCpMinOrder(c.minOrderAmount);
+    setCpMaxDiscount(c.maxDiscount ? String(c.maxDiscount) : '');
+    setCpExpires(
+      expiry
+        ? `${expiry.getFullYear()}-${String(expiry.getMonth() + 1).padStart(2, '0')}-${String(expiry.getDate()).padStart(2, '0')}`
+        : ''
+    );
+    setCpUsageLimit(c.usageLimit ? String(c.usageLimit) : '');
+    setCpPerUser(c.perUserLimit);
+    setCpFirstOrder(c.firstOrderOnly);
+    setIsCouponModalOpen(true);
+  };
+
+  // Operations login creation (admin only)
+  const handleCreateStaff = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const saved = await runAction(
+      () =>
+        appStore.createStaff({
+          fullName: staffName.trim(),
+          email: staffEmail.trim(),
+          phoneNumber: staffPhone.trim() || undefined,
+          password: staffPassword,
+        }),
+      `Created operations login for ${staffEmail.trim()}.`
+    );
+    if (saved) {
+      setStaffName('');
+      setStaffEmail('');
+      setStaffPhone('');
+      setStaffPassword('');
+    }
   };
 
   // Order status transition
-  const handleUpdateOrderStatus = (orderId: string, newStatus: CustomerOrder['orderStatus']) => {
-    appStore.updateOrderStatus(orderId, newStatus);
-    refreshData();
-    if (viewingOrder && viewingOrder.id === orderId) {
+  const handleUpdateOrderStatus = async (orderId: string, newStatus: CustomerOrder['orderStatus']) => {
+    const updated = await runAction(() => appStore.updateOrderStatus(orderId, newStatus), `Order status updated to ${newStatus}`);
+    if (updated && viewingOrder && viewingOrder.id === orderId) {
       setViewingOrder({ ...viewingOrder, orderStatus: newStatus });
     }
-    showToast(`Order status updated to ${newStatus}`);
   };
 
   // CSV Export utility
@@ -380,6 +681,31 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             />
           </div>
 
+          {/* View switch, refresh and live updates */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex rounded-xl overflow-hidden border border-[#18482d] text-xs font-bold">
+              <button
+                onClick={() => toggleGraphMode(false)}
+                className={`px-3 py-1.5 ${!graphMode ? 'bg-[#bdeecd] text-[#002111]' : 'text-[#8bba9b] hover:text-white'}`}
+              >
+                ☰ Table
+              </button>
+              <button
+                onClick={() => toggleGraphMode(true)}
+                className={`px-3 py-1.5 ${graphMode ? 'bg-[#bdeecd] text-[#002111]' : 'text-[#8bba9b] hover:text-white'}`}
+              >
+                📈 Graph
+              </button>
+            </div>
+            <button
+              onClick={handleRefresh}
+              title={`Last updated ${lastUpdated.toLocaleTimeString()}`}
+              className="bg-[#0e3b23] hover:bg-[#155030] border border-[#236841] text-white text-xs font-bold px-3 py-1.5 rounded-xl"
+            >
+              ⟳ Refresh
+            </button>
+          </div>
+
           {/* Actions: Customer Store switch, Logout */}
           <div className="flex items-center gap-2">
             <button
@@ -410,6 +736,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
               { id: 'expenses', label: '💸 Expenses' },
               { id: 'orders', label: '🛍️ Orders & Exceptions' },
               { id: 'notifications', label: '📢 Notifications' },
+              { id: 'coupons', label: '🎟️ Coupons' },
+              { id: 'staff', label: '👷 Operations Team' },
               { id: 'delivery-settings', label: '📍 Delivery Zones' },
               { id: 'feedback', label: '⭐ Customer Feedback' },
               { id: 'audit-logs', label: '📜 Audit Logs' },
@@ -498,6 +826,22 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
       {/* MAIN ADMIN WORKSPACE */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex-1 w-full space-y-6">
+        {showGraphs && activeSection === 'orders' && (
+          <div className="flex justify-end">{ordersAutoRefreshSwitch}</div>
+        )}
+        {showGraphs && (
+          <AdminGraphs
+            section={activeSection}
+            metrics={metrics}
+            orders={orders}
+            products={products}
+            purchases={purchases}
+            manualSales={manualSales}
+            expenses={expenses}
+            feedback={feedback}
+          />
+        )}
+
         {/* VIEW 1: DASHBOARD */}
         {activeSection === 'dashboard' && (
           <div className="space-y-6">
@@ -603,7 +947,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
             </div>
 
             {/* Quick Actions & Recent Activity Table */}
-            <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
+            <div className={`bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4 ${showGraphs ? 'hidden' : ''}`}>
               <div className="flex items-center justify-between">
                 <h3 className="text-base font-bold text-gray-900">
                   Recent Orders & Fulfilment Status
@@ -653,7 +997,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         )}
 
         {/* VIEW 2: PRODUCTS MANAGEMENT */}
-        {activeSection === 'products' && (
+        {activeSection === 'products' && !showGraphs && (
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
@@ -738,9 +1082,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                         <button
                           onClick={() => {
                             if (confirm(`Archive ${p.nameEn}?`)) {
-                              appStore.deleteProduct(p.id);
-                              refreshData();
-                              showToast(`Archived ${p.nameEn}`);
+                              runAction(() => appStore.deleteProduct(p.id), `Archived ${p.nameEn}`);
                             }
                           }}
                           className="text-red-600 hover:underline"
@@ -757,7 +1099,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         )}
 
         {/* VIEW 3: INVENTORY MOVEMENTS LEDGER */}
-        {activeSection === 'inventory' && (
+        {activeSection === 'inventory' && !showGraphs && (
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -818,7 +1160,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         )}
 
         {/* VIEW 4: PURCHASES */}
-        {activeSection === 'purchases' && (
+        {activeSection === 'purchases' && !showGraphs && (
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -879,7 +1221,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         )}
 
         {/* VIEW 5: SALES */}
-        {activeSection === 'sales' && (
+        {activeSection === 'sales' && !showGraphs && (
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -960,7 +1302,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         )}
 
         {/* VIEW 6: EXPENSES */}
-        {activeSection === 'expenses' && (
+        {activeSection === 'expenses' && !showGraphs && (
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -1019,7 +1361,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         )}
 
         {/* VIEW 7: ORDERS & FULFILMENT */}
-        {activeSection === 'orders' && (
+        {activeSection === 'orders' && !showGraphs && (
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -1030,12 +1372,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   Fulfilment workflow: Placed → Confirmed → Packed → Out for Delivery → Delivered.
                 </p>
               </div>
-              <button
-                onClick={() => handleExportCSV(orders, 'orders_export')}
-                className="px-3 py-1.5 border border-gray-300 rounded-xl text-xs font-semibold hover:bg-gray-50"
-              >
-                📥 Export Orders CSV
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                {ordersAutoRefreshSwitch}
+                <button
+                  onClick={() => handleExportCSV(orders, 'orders_export')}
+                  className="px-3 py-1.5 border border-gray-300 rounded-xl text-xs font-semibold hover:bg-gray-50"
+                >
+                  📥 Export Orders CSV
+                </button>
+              </div>
             </div>
 
             <div className="overflow-x-auto">
@@ -1120,7 +1465,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 </p>
               </div>
               <button
-                onClick={() => setIsNotificationModalOpen(true)}
+                onClick={openNewNotification}
                 className="px-3.5 py-1.5 bg-emerald-700 text-white rounded-xl text-xs font-bold"
               >
                 + New Announcement
@@ -1148,20 +1493,24 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => {
-                        n.isActive = !n.isActive;
-                        appStore.saveNotification(n);
-                        refreshData();
-                        showToast(`Announcement ${n.isActive ? 'activated' : 'paused'}`);
+                        runAction(
+                          () => appStore.saveNotification({ ...n, isActive: !n.isActive }),
+                          `Announcement ${n.isActive ? 'paused' : 'activated'}`
+                        );
                       }}
                       className={`text-xs font-bold px-3 py-1 rounded-xl ${n.isActive ? 'bg-emerald-700 text-white' : 'bg-gray-300 text-gray-700'}`}
                     >
                       {n.isActive ? 'Active' : 'Hidden'}
                     </button>
                     <button
+                      onClick={() => openEditNotification(n)}
+                      className="text-emerald-700 text-xs hover:underline font-bold"
+                    >
+                      Edit
+                    </button>
+                    <button
                       onClick={() => {
-                        appStore.deleteNotification(n.id);
-                        refreshData();
-                        showToast('Deleted announcement');
+                        runAction(() => appStore.deleteNotification(n.id), 'Deleted announcement');
                       }}
                       className="text-red-600 text-xs hover:underline font-bold"
                     >
@@ -1174,20 +1523,197 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
           </div>
         )}
 
+        {/* VIEW 8b: COUPONS */}
+        {activeSection === 'coupons' && (
+          <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-bold text-gray-900">Coupons</h3>
+                <p className="text-xs text-gray-500">
+                  Codes customers type in the cart. The server checks every rule when the order is placed.
+                </p>
+              </div>
+              <button
+                onClick={openNewCoupon}
+                className="px-3.5 py-1.5 bg-emerald-700 text-white rounded-xl text-xs font-bold"
+              >
+                + New Coupon
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {coupons.length === 0 && <p className="text-xs text-gray-500">No coupons yet.</p>}
+              {coupons.map((c) => {
+                const uses = orders.filter((o) => o.couponCode === c.code && o.orderStatus !== 'CANCELLED').length;
+                return (
+                  <div
+                    key={c.id}
+                    className="p-4 rounded-2xl border border-gray-200 bg-gray-50 flex items-start justify-between gap-4"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-extrabold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-900">
+                          {c.code}
+                        </span>
+                        <span className="text-xs font-bold text-gray-900">
+                          {c.discountType === 'PERCENT'
+                            ? `${c.discountValue}% off${c.maxDiscount ? ` (up to ₹${c.maxDiscount})` : ''}`
+                            : `Flat ₹${c.discountValue} off`}
+                        </span>
+                      </div>
+                      {c.description && <p className="text-xs text-gray-600">{c.description}</p>}
+                      <p className="text-[11px] text-gray-500">
+                        {[
+                          c.minOrderAmount > 0 ? `Min order ₹${c.minOrderAmount}` : null,
+                          `${c.perUserLimit} per customer`,
+                          c.firstOrderOnly ? 'First order only' : null,
+                          c.expiresAt ? `Expires ${new Date(c.expiresAt).toLocaleDateString()}` : null,
+                          `Used ${uses}${c.usageLimit ? ` of ${c.usageLimit}` : ''}`,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          runAction(
+                            () => appStore.saveCoupon({ ...c, isActive: !c.isActive }),
+                            `Coupon ${c.isActive ? 'paused' : 'activated'}`
+                          );
+                        }}
+                        className={`text-xs font-bold px-3 py-1 rounded-xl ${c.isActive ? 'bg-emerald-700 text-white' : 'bg-gray-300 text-gray-700'}`}
+                      >
+                        {c.isActive ? 'Active' : 'Hidden'}
+                      </button>
+                      <button
+                        onClick={() => openEditCoupon(c)}
+                        className="text-emerald-700 text-xs hover:underline font-bold"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => {
+                          runAction(() => appStore.deleteCoupon(c.id), 'Deleted coupon');
+                        }}
+                        className="text-red-600 text-xs hover:underline font-bold"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* VIEW 8c: OPERATIONS TEAM */}
+        {activeSection === 'staff' && (
+          <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
+            <div>
+              <h3 className="text-base font-bold text-gray-900">Operations Team Logins</h3>
+              <p className="text-xs text-gray-500">
+                Operations staff sign in on the same screen as everyone else. They can update order status and view
+                stock only. Only admins can create these logins.
+              </p>
+            </div>
+
+            <form onSubmit={handleCreateStaff} className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <input
+                type="text"
+                required
+                value={staffName}
+                onChange={(e) => setStaffName(e.target.value)}
+                placeholder="Full name"
+                className="border rounded-xl px-3 py-2"
+              />
+              <input
+                type="email"
+                required
+                value={staffEmail}
+                onChange={(e) => setStaffEmail(e.target.value)}
+                placeholder="Login email"
+                className="border rounded-xl px-3 py-2"
+              />
+              <input
+                type="tel"
+                value={staffPhone}
+                onChange={(e) => setStaffPhone(e.target.value)}
+                placeholder="Mobile (optional)"
+                className="border rounded-xl px-3 py-2"
+              />
+              <input
+                type="password"
+                required
+                minLength={6}
+                value={staffPassword}
+                onChange={(e) => setStaffPassword(e.target.value)}
+                placeholder="Password (min 6 characters)"
+                className="border rounded-xl px-3 py-2"
+              />
+              <button type="submit" className="md:col-span-2 py-2.5 bg-emerald-700 text-white font-bold rounded-xl">
+                + Create Operations Login
+              </button>
+            </form>
+
+            <div className="space-y-2">
+              {staff.length === 0 && <p className="text-xs text-gray-500">No operations logins yet.</p>}
+              {staff.map((s) => (
+                <div
+                  key={s.id}
+                  className="p-3 rounded-2xl border border-gray-200 bg-gray-50 flex items-center justify-between gap-4 text-xs"
+                >
+                  <div>
+                    <p className="font-bold text-gray-900">{s.fullName}</p>
+                    <p className="text-gray-500">
+                      {s.email}
+                      {s.phoneNumber ? ` · ${s.phoneNumber}` : ''}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      runAction(() => appStore.deleteStaff(s.id), `Removed ${s.email}`);
+                    }}
+                    className="text-red-600 hover:underline font-bold"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* VIEW 9: DELIVERY ZONES */}
         {activeSection === 'delivery-settings' && (
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
-            <h3 className="text-base font-bold text-gray-900">
-              Active Lucknow Delivery Zones & Serviceability
-            </h3>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h3 className="text-base font-bold text-gray-900">
+                Active Lucknow Delivery Zones & Serviceability
+              </h3>
+              <button
+                onClick={openNewZone}
+                className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-sm"
+              >
+                + Add Zone
+              </button>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {zones.map((z) => (
                 <div key={z.id} className="p-4 rounded-2xl border border-gray-200 bg-gray-50 space-y-2">
                   <div className="flex items-center justify-between">
                     <h4 className="text-sm font-bold text-gray-900">{z.name}</h4>
-                    <span className="bg-emerald-100 text-emerald-900 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                      Active Zone
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${z.isActive ? 'bg-emerald-100 text-emerald-900' : 'bg-gray-200 text-gray-600'}`}
+                      >
+                        {z.isActive ? 'Active Zone' : 'Inactive'}
+                      </span>
+                      <button onClick={() => openEditZone(z)} className="text-emerald-700 text-xs hover:underline font-bold">
+                        Edit
+                      </button>
+                    </div>
                   </div>
                   <p className="text-xs text-gray-600">
                     Serviceable Pincodes: <strong>{z.pincodes.join(', ')}</strong>
@@ -1199,6 +1725,32 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     </span>
                     <span>Cutoff: {z.cutoffTime}</span>
                   </div>
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-gray-200 text-xs">
+                    <label className="font-bold text-gray-700">
+                      Order cut-off (after this, orders count for the next day):
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="time"
+                        value={zoneCutoffs[z.id] ?? z.cutoffTime}
+                        onChange={(e) => setZoneCutoffs({ ...zoneCutoffs, [z.id]: e.target.value })}
+                        className="border rounded-lg px-2 py-1"
+                      />
+                      <button
+                        disabled={!zoneCutoffs[z.id] || zoneCutoffs[z.id] === z.cutoffTime}
+                        onClick={async () => {
+                          const ok = await runAction(
+                            () => appStore.saveZone({ ...z, cutoffTime: zoneCutoffs[z.id] }),
+                            `Cut-off for ${z.name} set to ${zoneCutoffs[z.id]}`
+                          );
+                          if (ok) setZoneCutoffs((prev) => ({ ...prev, [z.id]: '' }));
+                        }}
+                        className="px-3 py-1 bg-emerald-700 text-white font-bold rounded-lg disabled:opacity-40"
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -1206,7 +1758,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
         )}
 
         {/* VIEW 10: CUSTOMER FEEDBACK */}
-        {activeSection === 'feedback' && (
+        {activeSection === 'feedback' && !showGraphs && (
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -1718,7 +2270,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-gray-200 space-y-4">
             <div className="flex justify-between items-center border-b pb-2">
               <h3 className="text-base font-bold text-gray-900">
-                📢 Publish In-App Announcement
+                {editingNotif ? '📢 Edit Announcement' : '📢 Publish In-App Announcement'}
               </h3>
               <button onClick={() => setIsNotificationModalOpen(false)} className="text-gray-400 hover:text-black">
                 ✕
@@ -1767,7 +2319,225 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 type="submit"
                 className="w-full py-3 bg-emerald-700 text-white font-bold rounded-2xl"
               >
-                Publish to Customer Store
+                {editingNotif ? 'Save Changes' : 'Publish to Customer Store'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5b: NEW COUPON */}
+      {isZoneModalOpen && (
+        <div className="fixed inset-0 z-[150] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-gray-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b pb-2">
+              <h3 className="text-base font-bold text-gray-900">{editingZone ? '📍 Edit Delivery Zone' : '📍 New Delivery Zone'}</h3>
+              <button onClick={() => setIsZoneModalOpen(false)} className="text-gray-400 hover:text-black">
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateZone} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-gray-700 mb-1">Zone name</label>
+                <input
+                  type="text"
+                  required
+                  value={zoneName}
+                  onChange={(e) => setZoneName(e.target.value)}
+                  placeholder="e.g. Gomti Nagar"
+                  className="w-full border rounded-xl px-3 py-2"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-gray-700 mb-1">Serviceable pincodes</label>
+                <input
+                  type="text"
+                  required
+                  value={zonePincodes}
+                  onChange={(e) => setZonePincodes(e.target.value)}
+                  placeholder="226010, 226016"
+                  className="w-full border rounded-xl px-3 py-2"
+                />
+                <p className="text-[11px] text-gray-500 mt-1">6-digit pincodes separated by commas.</p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Delivery fee (₹)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={zoneFee}
+                    onChange={(e) => setZoneFee(Number(e.target.value))}
+                    className="w-full border rounded-xl px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Free delivery above (₹)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={zoneFreeAbove}
+                    onChange={(e) => setZoneFreeAbove(Number(e.target.value))}
+                    className="w-full border rounded-xl px-3 py-2"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block font-bold text-gray-700 mb-1">Order cut-off time</label>
+                <input
+                  type="time"
+                  required
+                  value={zoneCutoff}
+                  onChange={(e) => setZoneCutoff(e.target.value)}
+                  className="w-full border rounded-xl px-3 py-2"
+                />
+              </div>
+              {editingZone && (
+                <label className="flex items-center gap-2 font-bold text-gray-700">
+                  <input type="checkbox" checked={zoneActive} onChange={(e) => setZoneActive(e.target.checked)} />
+                  Zone is active (customers can order here)
+                </label>
+              )}
+              <button type="submit" className="w-full py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl">
+                {editingZone ? 'Save Changes' : 'Add Zone'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {isCouponModalOpen && (
+        <div className="fixed inset-0 z-[150] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-gray-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b pb-2">
+              <h3 className="text-base font-bold text-gray-900">{editingCoupon ? '🎟️ Edit Coupon' : '🎟️ New Coupon'}</h3>
+              <button onClick={() => setIsCouponModalOpen(false)} className="text-gray-400 hover:text-black">
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateCoupon} className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-gray-700 mb-1">Code</label>
+                <input
+                  type="text"
+                  required
+                  value={cpCode}
+                  onChange={(e) => setCpCode(e.target.value.toUpperCase())}
+                  placeholder="e.g. TAAZI50"
+                  className="w-full border rounded-xl px-3 py-2 uppercase"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-gray-700 mb-1">Description</label>
+                <input
+                  type="text"
+                  value={cpDescription}
+                  onChange={(e) => setCpDescription(e.target.value)}
+                  placeholder="Shown to the customer when applied"
+                  className="w-full border rounded-xl px-3 py-2"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Type</label>
+                  <select
+                    value={cpType}
+                    onChange={(e) => setCpType(e.target.value as Coupon['discountType'])}
+                    className="w-full border rounded-xl px-3 py-2"
+                  >
+                    <option value="FLAT">Flat ₹ off</option>
+                    <option value="PERCENT">Percent off</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">
+                    {cpType === 'PERCENT' ? 'Percent (1-100)' : 'Amount (₹)'}
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min={1}
+                    max={cpType === 'PERCENT' ? 100 : undefined}
+                    value={cpValue}
+                    onChange={(e) => setCpValue(Number(e.target.value))}
+                    className="w-full border rounded-xl px-3 py-2"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Minimum order (₹)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={cpMinOrder}
+                    onChange={(e) => setCpMinOrder(Number(e.target.value))}
+                    className="w-full border rounded-xl px-3 py-2"
+                  />
+                </div>
+                {cpType === 'PERCENT' && (
+                  <div>
+                    <label className="block font-bold text-gray-700 mb-1">Max discount (₹)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={cpMaxDiscount}
+                      onChange={(e) => setCpMaxDiscount(e.target.value)}
+                      placeholder="No cap"
+                      className="w-full border rounded-xl px-3 py-2"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Expires on</label>
+                  <input
+                    type="date"
+                    value={cpExpires}
+                    onChange={(e) => setCpExpires(e.target.value)}
+                    className="w-full border rounded-xl px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Total uses</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={cpUsageLimit}
+                    onChange={(e) => setCpUsageLimit(e.target.value)}
+                    placeholder="Unlimited"
+                    className="w-full border rounded-xl px-3 py-2"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 items-end">
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Uses per customer</label>
+                  <input
+                    type="number"
+                    required
+                    min={1}
+                    value={cpPerUser}
+                    onChange={(e) => setCpPerUser(Number(e.target.value))}
+                    className="w-full border rounded-xl px-3 py-2"
+                  />
+                </div>
+                <label className="flex items-center gap-2 font-bold text-gray-700 pb-2">
+                  <input type="checkbox" checked={cpFirstOrder} onChange={(e) => setCpFirstOrder(e.target.checked)} />
+                  First order only
+                </label>
+              </div>
+
+              <button type="submit" className="w-full py-3 bg-emerald-700 text-white font-bold rounded-2xl">
+                {editingCoupon ? 'Save Changes' : 'Create Coupon'}
               </button>
             </form>
           </div>
@@ -1794,6 +2564,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
 
             <div className="bg-gray-50 p-3 rounded-2xl text-xs space-y-1">
               <p><strong>Address:</strong> {viewingOrder.deliveryAddress.addressLine}, {viewingOrder.deliveryAddress.flatNumber}</p>
+              <p><strong>Order day:</strong> {viewingOrder.orderDate} (placed {new Date(viewingOrder.createdAt).toLocaleString()})</p>
               <p><strong>Slot:</strong> {viewingOrder.deliverySlot.title}</p>
               <p><strong>Payment:</strong> {viewingOrder.paymentMethod} ({viewingOrder.paymentStatus})</p>
               {viewingOrder.deliveryNotes && (
@@ -1809,6 +2580,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                   <span className="font-bold">₹{it.itemTotal}</span>
                 </div>
               ))}
+              {viewingOrder.discountTotal > 0 && (
+                <div className="pt-2 flex justify-between text-emerald-700 font-bold">
+                  <span>Coupon {viewingOrder.couponCode}:</span>
+                  <span>-₹{viewingOrder.discountTotal}</span>
+                </div>
+              )}
               <div className="pt-2 flex justify-between font-black text-sm text-gray-900">
                 <span>Grand Total:</span>
                 <span>₹{viewingOrder.grandTotal}</span>

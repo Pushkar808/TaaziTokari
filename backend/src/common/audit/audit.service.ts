@@ -1,47 +1,24 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { AuditAction } from '@prisma/client';
+
+type Db = PrismaService | Prisma.TransactionClient;
 
 @Injectable()
 export class AuditService {
-  private readonly logger = new Logger(AuditService.name);
-
   constructor(private readonly prisma: PrismaService) {}
 
-  /**
-   * Writes an immutable audit entry to PostgreSQL.
-   */
-  async logAction(params: {
-    action: AuditAction;
-    entityName: string;
-    entityId?: string;
-    actorId: string;
-    details: Record<string, any>;
-    ipAddress?: string;
-  }) {
-    const { action, entityName, entityId, actorId, details, ipAddress } = params;
+  /** Writes one audit row. Pass a transaction client to make it part of that transaction. */
+  log(
+    entry: { action: string; entityType: string; entityId?: string; actor: string; details?: string },
+    db: Db = this.prisma
+  ) {
+    return db.auditLog.create({ data: entry });
+  }
 
-    try {
-      const record = await this.prisma.auditLog.create({
-        data: {
-          action,
-          entityName,
-          entityId,
-          actorId,
-          details,
-          ipAddress,
-        },
-      });
-
-      this.logger.log(
-        `[AUDIT] Action: ${action} on ${entityName} (${entityId || 'N/A'}) by Actor: ${actorId}`
-      );
-
-      return record;
-    } catch (error) {
-      this.logger.error(`Failed to record audit log: ${(error as Error).message}`, (error as Error).stack);
-      // In production, we ensure audit failure alerts pagerduty/sentry
-      throw error;
-    }
+  /** "Full Name (role)" for audit rows and inventory notes. */
+  async actorName(userId: string, db: Db = this.prisma): Promise<string> {
+    const user = await db.profile.findUnique({ where: { id: userId }, select: { fullName: true, role: true } });
+    return user ? `${user.fullName || 'User'} (${user.role})` : 'System';
   }
 }

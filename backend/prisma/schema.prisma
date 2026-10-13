@@ -1,0 +1,370 @@
+// Taazi Tokari database schema. Applied with `prisma db push`.
+// Only the NestJS backend talks to this database. Money is INR (Decimal 10,2).
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  customer
+  admin
+  operations
+
+  @@map("user_role")
+}
+
+enum OrderStatus {
+  PLACED
+  CONFIRMED
+  PACKED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+
+  @@map("order_status")
+}
+
+enum PaymentMethod {
+  COD
+  ONLINE_RAZORPAY
+
+  @@map("payment_method")
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  REFUNDED
+
+  @@map("payment_status")
+}
+
+enum InventoryReason {
+  PURCHASE
+  MANUAL_SALE
+  ONLINE_ORDER
+  WASTAGE
+  ADJUSTMENT
+  INITIAL
+
+  @@map("inventory_reason")
+}
+
+enum ExpenseCategory {
+  TRANSPORT
+  PACKAGING
+  MARKET_TRAVEL
+  WASTAGE
+  UTILITIES
+  OTHER
+
+  @@map("expense_category")
+}
+
+enum NotificationType {
+  ANNOUNCEMENT
+  OFFER
+  HARVEST_ALERT
+
+  @@map("notification_type")
+}
+
+enum DiscountType {
+  PERCENT
+  FLAT
+
+  @@map("discount_type")
+}
+
+model Profile {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String   @unique
+  passwordHash String?  @map("password_hash")
+  googleId     String?  @unique @map("google_id")
+  fullName     String   @default("") @map("full_name")
+  phone        String   @default("")
+  avatarUrl    String?  @map("avatar_url")
+  role         UserRole @default(customer)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  addresses CustomerAddress[]
+  orders    Order[]
+  feedback  CustomerFeedback[]
+
+  @@map("profiles")
+}
+
+model DeliveryZone {
+  id                   String  @id @default(dbgenerated("(gen_random_uuid())::text"))
+  name                 String
+  pincodes             String[]
+  minOrderFreeDelivery Decimal @default(199) @map("min_order_free_delivery") @db.Decimal(10, 2)
+  deliveryFee          Decimal @default(25) @map("delivery_fee") @db.Decimal(10, 2)
+  cutoffTime           String  @default("22:00") @map("cutoff_time")
+  isActive             Boolean @default(true) @map("is_active")
+
+  addresses CustomerAddress[]
+
+  @@map("delivery_zones")
+}
+
+model DeliverySlot {
+  id          String  @id @default(dbgenerated("(gen_random_uuid())::text"))
+  title       String
+  timeRange   String  @map("time_range")
+  description String  @default("")
+  isActive    Boolean @default(true) @map("is_active")
+
+  @@map("delivery_slots")
+}
+
+model CustomerAddress {
+  id            String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  userId        String   @map("user_id") @db.Uuid
+  recipientName String   @map("recipient_name")
+  phone         String
+  addressLine   String   @map("address_line")
+  flatNumber    String   @map("flat_number")
+  blockBuilding String   @default("") @map("block_building")
+  landmark      String?
+  zoneId        String   @map("zone_id")
+  pincode       String
+  latitude      Float?
+  longitude     Float?
+  isDefault     Boolean  @default(false) @map("is_default")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user Profile      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  zone DeliveryZone @relation(fields: [zoneId], references: [id])
+
+  @@index([userId])
+  @@map("customer_addresses")
+}
+
+model Category {
+  id           String  @id @default(dbgenerated("(gen_random_uuid())::text"))
+  slug         String  @unique
+  nameEn       String  @map("name_en")
+  nameHi       String  @default("") @map("name_hi")
+  iconName     String  @default("Leaf") @map("icon_name")
+  displayOrder Int     @default(0) @map("display_order")
+  isActive     Boolean @default(true) @map("is_active")
+
+  products Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id                String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  nameEn            String   @map("name_en")
+  nameHi            String   @default("") @map("name_hi")
+  categorySlug      String   @map("category_slug")
+  unit              String
+  price             Decimal  @db.Decimal(10, 2)
+  mrp               Decimal  @db.Decimal(10, 2)
+  stockQty          Decimal  @default(0) @map("stock_qty") @db.Decimal(10, 2)
+  weightedCost      Decimal  @default(0) @map("weighted_cost") @db.Decimal(10, 2)
+  lowStockThreshold Decimal  @default(10) @map("low_stock_threshold") @db.Decimal(10, 2)
+  isAvailable       Boolean  @default(true) @map("is_available")
+  isNewArrival      Boolean  @default(false) @map("is_new_arrival")
+  isPopular         Boolean  @default(false) @map("is_popular")
+  isBestPrice       Boolean  @default(false) @map("is_best_price")
+  origin            String   @default("")
+  topBadge          String?  @map("top_badge")
+  description       String   @default("")
+  imageUrl          String   @default("") @map("image_url")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+
+  category Category @relation(fields: [categorySlug], references: [slug])
+
+  @@index([categorySlug])
+  @@map("products")
+}
+
+model InventoryMovement {
+  id              String          @id @default(dbgenerated("(gen_random_uuid())::text"))
+  productId       String          @map("product_id")
+  productName     String          @map("product_name")
+  changeQty       Decimal         @map("change_qty") @db.Decimal(10, 2)
+  balanceQtyAfter Decimal         @map("balance_qty_after") @db.Decimal(10, 2)
+  reason          InventoryReason
+  referenceId     String?         @map("reference_id")
+  notes           String?
+  recordedBy      String          @map("recorded_by")
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("inventory_movements")
+}
+
+model Purchase {
+  id           String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  date         DateTime @db.Date
+  productId    String   @map("product_id")
+  productName  String   @map("product_name")
+  quantity     Decimal  @db.Decimal(10, 2)
+  unit         String
+  totalCost    Decimal  @map("total_cost") @db.Decimal(10, 2)
+  unitCost     Decimal  @map("unit_cost") @db.Decimal(10, 2)
+  supplierName String?  @map("supplier_name")
+  notes        String?
+  recordedBy   String   @map("recorded_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([date])
+  @@map("purchases")
+}
+
+model ManualSale {
+  id           String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  date         DateTime @db.Date
+  productId    String   @map("product_id")
+  productName  String   @map("product_name")
+  quantity     Decimal  @db.Decimal(10, 2)
+  unit         String
+  sellingPrice Decimal  @map("selling_price") @db.Decimal(10, 2)
+  totalRevenue Decimal  @map("total_revenue") @db.Decimal(10, 2)
+  notes        String?
+  recordedBy   String   @map("recorded_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([date])
+  @@map("manual_sales")
+}
+
+model Expense {
+  id         String          @id @default(dbgenerated("(gen_random_uuid())::text"))
+  date       DateTime        @db.Date
+  category   ExpenseCategory
+  amount     Decimal         @db.Decimal(10, 2)
+  notes      String          @default("")
+  recordedBy String          @map("recorded_by")
+  createdAt  DateTime        @default(now()) @map("created_at")
+
+  @@index([date])
+  @@map("expenses")
+}
+
+// Address and slot are stored as JSON snapshots so history never changes.
+model Order {
+  id               String        @id @default(dbgenerated("(gen_random_uuid())::text"))
+  seq              Int           @unique @default(autoincrement())
+  // The business day the order belongs to: orders placed after the zone cut-off count for the next day.
+  orderDate        DateTime      @default(now()) @map("order_date") @db.Date
+  orderNumber      String        @unique @map("order_number")
+  userId           String        @map("user_id") @db.Uuid
+  customerName     String        @map("customer_name")
+  customerPhone    String        @map("customer_phone")
+  deliveryAddress  Json          @map("delivery_address")
+  deliverySlot     Json          @map("delivery_slot")
+  subtotal         Decimal       @db.Decimal(10, 2)
+  deliveryFee      Decimal       @map("delivery_fee") @db.Decimal(10, 2)
+  savingsTotal     Decimal       @map("savings_total") @db.Decimal(10, 2)
+  grandTotal       Decimal       @map("grand_total") @db.Decimal(10, 2)
+  // Coupon snapshot: no foreign key, so deleting a coupon never breaks order history.
+  couponCode       String?       @map("coupon_code")
+  discountTotal    Decimal       @default(0) @map("discount_total") @db.Decimal(10, 2)
+  paymentMethod    PaymentMethod @map("payment_method")
+  paymentStatus    PaymentStatus @default(PENDING) @map("payment_status")
+  status           OrderStatus   @default(PLACED)
+  deliveryNotes    String?       @map("delivery_notes")
+  feedbackSubmitted Boolean      @default(false) @map("feedback_submitted")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @default(now()) @updatedAt @map("updated_at")
+
+  user  Profile     @relation(fields: [userId], references: [id])
+  items OrderItem[]
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([couponCode])
+  @@index([orderDate])
+  @@map("orders")
+}
+
+model OrderItem {
+  id        String  @id @default(dbgenerated("(gen_random_uuid())::text"))
+  orderId   String  @map("order_id")
+  productId String  @map("product_id")
+  nameEn    String  @map("name_en")
+  nameHi    String  @default("") @map("name_hi")
+  unit      String
+  price     Decimal @db.Decimal(10, 2)
+  mrp       Decimal @db.Decimal(10, 2)
+  quantity  Decimal @db.Decimal(10, 2)
+  itemTotal Decimal @map("item_total") @db.Decimal(10, 2)
+  imageUrl  String  @default("") @map("image_url")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+model Notification {
+  id             String           @id @default(dbgenerated("(gen_random_uuid())::text"))
+  title          String
+  message        String
+  type           NotificationType @default(ANNOUNCEMENT)
+  bannerImageUrl String?          @map("banner_image_url")
+  actionText     String?          @map("action_text")
+  actionUrl      String?          @map("action_url")
+  isActive       Boolean          @default(true) @map("is_active")
+  priority       Int              @default(1)
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  @@map("notifications")
+}
+
+model Coupon {
+  id             String       @id @default(dbgenerated("(gen_random_uuid())::text"))
+  code           String       @unique
+  description    String       @default("")
+  discountType   DiscountType @map("discount_type")
+  discountValue  Decimal      @map("discount_value") @db.Decimal(10, 2)
+  minOrderAmount Decimal      @default(0) @map("min_order_amount") @db.Decimal(10, 2)
+  maxDiscount    Decimal?     @map("max_discount") @db.Decimal(10, 2)
+  expiresAt      DateTime?    @map("expires_at")
+  usageLimit     Int?         @map("usage_limit")
+  perUserLimit   Int          @default(1) @map("per_user_limit")
+  firstOrderOnly Boolean      @default(false) @map("first_order_only")
+  isActive       Boolean      @default(true) @map("is_active")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@map("coupons")
+}
+
+model CustomerFeedback {
+  id           String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  orderId      String   @unique @map("order_id")
+  orderNumber  String   @map("order_number")
+  userId       String   @map("user_id") @db.Uuid
+  customerName String   @map("customer_name")
+  rating       Int
+  comment      String   @default("")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user Profile @relation(fields: [userId], references: [id])
+
+  @@map("customer_feedback")
+}
+
+model AuditLog {
+  id         String   @id @default(dbgenerated("(gen_random_uuid())::text"))
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  actor      String
+  details    String   @default("")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("audit_logs")
+}
